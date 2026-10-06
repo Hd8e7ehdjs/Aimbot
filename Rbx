@@ -1,0 +1,862 @@
+--==============================================================
+--  HUB FINAL — Base funcional + Extras
+--  Aimbot (Players + NPCs) | Tracer Drawing | ESP completo
+--  Speed | Dash | WalkWater | Infinite Energy | Fast Attack
+--  UI com scroll + seções
+--==============================================================
+
+--==================== CONFIG ====================
+local CONFIG = {
+    -- Aimbot
+    EnableAimbot        = true,
+    AimbotSkillsPlayer  = true,
+    AimbotSkillsNPC     = false,
+    PredictionAmount    = 0.2,
+    MaxDistance         = 2000,
+    FOV                 = 400,
+
+    -- Tracer
+    EnableTracer        = true,
+    NPCTracers          = false,
+    TracerColor         = Color3.fromRGB(255, 0, 0),
+    NPCColor            = Color3.fromRGB(255, 180, 80),
+    TracerThick         = 0.15,
+    UseDrawing          = true,
+
+    -- ESP
+    EnableESP           = true,
+    ESPShowLevel        = true,
+    ESPShowPvP          = true,
+    ESPShowHP           = true,
+    ESPShowDist         = true,
+
+    -- Movement
+    SpeedEnabled        = false,
+    SpeedValue          = 16,
+    DashEnabled         = false,
+    DashValue           = 300,
+    WalkOnWater         = false,
+    InfiniteEnergy      = false,
+
+    -- Combat
+    FastAttack          = false,
+    FADistance          = 100,
+
+    -- Geral
+    TeamCheck           = true,
+    UpdateRate          = 0.05,
+}
+
+--==================== SERVIÇOS ====================
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local Workspace   = game:GetService("Workspace")
+local UserInput   = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+
+--==================== CACHE ====================
+local CachedTarget    = nil
+local CachedAimPos    = nil
+local CachedTargetHRP = nil
+local CachedTargetIsNPC = false
+local CachedMyHRP     = nil
+local EnemiesFolder   = Workspace:FindFirstChild("Enemies")
+
+Workspace.ChildAdded:Connect(function(child)
+    if child.Name == "Enemies" then EnemiesFolder = child end
+end)
+
+--==================== SAFE ZONE ====================
+local SafeZoneParts = {}
+local function refreshSafeZones()
+    table.clear(SafeZoneParts)
+    for _, part in ipairs(Workspace:GetChildren()) do
+        if part:IsA("BasePart")
+           and (part.Name:find("SafeZone") or part.Name:find("PeaceZone")) then
+            table.insert(SafeZoneParts, part)
+        end
+    end
+end
+refreshSafeZones()
+task.spawn(function()
+    while task.wait(5) do refreshSafeZones() end
+end)
+
+local function isSafeZone(player)
+    if not player.Character then return true end
+    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return true end
+    if player.Character:FindFirstChild("ForceField") then return true end
+    for _, part in ipairs(SafeZoneParts) do
+        if part.Parent
+           and (hrp.Position - part.Position).Magnitude < part.Size.Magnitude / 2 + 10 then
+            return true
+        end
+    end
+    return false
+end
+
+local function isSameTeam(player)
+    if not CONFIG.TeamCheck then return false end
+    if not player.Team or not LocalPlayer.Team then return false end
+    return player.Team == LocalPlayer.Team
+end
+
+local function getTeamColor(player)
+    if player.Team and player.Team.TeamColor then
+        return player.Team.TeamColor.Color
+    end
+    return Color3.fromRGB(255, 255, 255)
+end
+
+--==================== PREDIÇÃO ====================
+local function predictPosition(hrp)
+    if not hrp then return nil end
+    local pred = CONFIG.PredictionAmount
+    if pred <= 0 then return hrp.Position end
+    local vel = hrp.AssemblyLinearVelocity or hrp.Velocity
+    if not vel then return hrp.Position end
+    return hrp.Position + (vel * pred)
+end
+
+--==================== SELETOR DE ALVO (Player + NPC) ====================
+local function isValidTarget(plr)
+    if plr == LocalPlayer then return false end
+    if not plr.Character or not plr.Character.Parent then return false end
+    local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+    local hrp = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character.PrimaryPart
+    if not (hum and hum.Health > 0 and hrp) then return false end
+    if isSameTeam(plr) then return false end
+    if isSafeZone(plr) then return false end
+    return true
+end
+
+local function isValidNPC(model)
+    if not model or not model.Parent then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if not (hum and hum.Health > 0 and hrp) then return false end
+    return true
+end
+
+local function updateTarget()
+    CachedMyHRP = LocalPlayer.Character
+        and (LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+             or LocalPlayer.Character.PrimaryPart)
+
+    if not CachedMyHRP or not CONFIG.EnableAimbot then
+        CachedTarget, CachedTargetHRP, CachedAimPos = nil, nil, nil
+        CachedTargetIsNPC = false
+        return
+    end
+
+    local myPos = CachedMyHRP.Position
+    local best, bestHRP, bestDist, bestIsNPC = nil, nil, math.huge, false
+
+    if CONFIG.AimbotSkillsPlayer then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if isValidTarget(plr) then
+                local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                          or plr.Character.PrimaryPart
+                local dist = (hrp.Position - myPos).Magnitude
+                if dist < bestDist and dist <= CONFIG.MaxDistance then
+                    bestDist, best, bestHRP, bestIsNPC = dist, plr, hrp, false
+                end
+            end
+        end
+    end
+
+    if CONFIG.AimbotSkillsNPC and EnemiesFolder then
+        for _, npc in ipairs(EnemiesFolder:GetChildren()) do
+            if isValidNPC(npc) then
+                local hrp = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
+                local dist = (hrp.Position - myPos).Magnitude
+                if dist < bestDist and dist <= CONFIG.MaxDistance then
+                    bestDist, best, bestHRP, bestIsNPC = dist, npc, hrp, true
+                end
+            end
+        end
+    end
+
+    CachedTarget       = best
+    CachedTargetHRP    = bestHRP
+    CachedTargetIsNPC  = bestIsNPC
+    if bestHRP then
+        local head = bestHRP.Parent:FindFirstChild("Head") or bestHRP
+        CachedAimPos = head.Position
+    else
+        CachedAimPos = nil
+    end
+end
+
+--==================== HOOK __namecall (AIMBOT) ====================
+do
+    local ok = pcall(function()
+        local mt = getrawmetatable(game)
+        local old = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = newcclosure(function(self, ...)
+            if CONFIG.EnableAimbot and CachedAimPos then
+                local method = getnamecallmethod()
+                if method ~= "Fire" and method ~= "InvokeServer"
+                   and method ~= "Raycast" and method ~= "FindPartOnRay"
+                   and method ~= "FindPartOnRayWithIgnoreList" then
+                    local args = {...}
+                    for i = 1, math.min(4, #args) do
+                        local v = args[i]
+                        local tv = typeof(v)
+                        if tv == "Vector3" then
+                            args[i] = CachedAimPos
+                            return old(self, unpack(args))
+                        elseif tv == "CFrame" then
+                            args[i] = CFrame.new(v.Position, CachedAimPos)
+                            return old(self, unpack(args))
+                        end
+                    end
+                end
+            end
+            return old(self, ...)
+        end)
+        setreadonly(mt, true)
+    end)
+end
+
+--==================== TRACER (Player - Drawing) ====================
+local DrawingLine = nil
+local TracerBeam, TracerA, TracerB = nil, nil, nil
+
+local function destroyPlayerTracer()
+    if DrawingLine then pcall(function() DrawingLine:Remove() end) DrawingLine = nil end
+    if TracerBeam and TracerBeam.Parent then TracerBeam:Destroy() end
+    if TracerA and TracerA.Parent then TracerA:Destroy() end
+    if TracerB and TracerB.Parent then TracerB:Destroy() end
+    TracerBeam, TracerA, TracerB = nil, nil, nil
+end
+
+local function updatePlayerTracer()
+    if not CONFIG.EnableTracer or CachedTargetIsNPC
+       or not CachedTargetHRP or not CachedTargetHRP.Parent then
+        destroyPlayerTracer()
+        return
+    end
+
+    if CONFIG.UseDrawing and Drawing then
+        if not DrawingLine then
+            DrawingLine = Drawing.new("Line")
+            DrawingLine.Thickness    = 1.5
+            DrawingLine.Color        = CONFIG.TracerColor
+            DrawingLine.Transparency = 1
+            DrawingLine.Visible      = true
+        end
+        local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        local sp, onScreen = Camera:WorldToViewportPoint(CachedTargetHRP.Position)
+        if onScreen then
+            DrawingLine.From    = center
+            DrawingLine.To      = Vector2.new(sp.X, sp.Y)
+            DrawingLine.Visible = true
+        else
+            DrawingLine.Visible = false
+        end
+        return
+    end
+
+    if not TracerBeam or not TracerBeam.Parent
+       or not TracerB or TracerB.Parent ~= CachedTargetHRP.Parent then
+        destroyPlayerTracer()
+        local myHead = LocalPlayer.Character
+            and (LocalPlayer.Character:FindFirstChild("Head")
+                 or LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
+        local tgtHead = CachedTargetHRP.Parent:FindFirstChild("Head") or CachedTargetHRP
+        if not myHead or not tgtHead then return end
+
+        TracerA = Instance.new("Attachment", myHead)
+        TracerB = Instance.new("Attachment", tgtHead)
+        TracerBeam = Instance.new("Beam")
+        TracerBeam.Attachment0   = TracerA
+        TracerBeam.Attachment1   = TracerB
+        TracerBeam.Color         = ColorSequence.new(CONFIG.TracerColor)
+        TracerBeam.Width0        = CONFIG.TracerThick
+        TracerBeam.Width1        = CONFIG.TracerThick
+        TracerBeam.FaceCamera    = true
+        TracerBeam.LightEmission = 1
+        TracerBeam.Transparency  = NumberSequence.new(0.2)
+        TracerBeam.Parent        = Workspace
+    end
+end
+
+--==================== TRACER (NPC - Beam) ====================
+local NPCBeam, NPCA, NPCB = nil, nil, nil
+
+local function destroyNPCTracer()
+    if NPCBeam and NPCBeam.Parent then NPCBeam:Destroy() end
+    if NPCA and NPCA.Parent then NPCA:Destroy() end
+    if NPCB and NPCB.Parent then NPCB:Destroy() end
+    NPCBeam, NPCA, NPCB = nil, nil, nil
+end
+
+local function updateNPCTracer()
+    if not CONFIG.NPCTracers or not CachedTargetIsNPC
+       or not CachedTargetHRP or not CachedTargetHRP.Parent then
+        destroyNPCTracer()
+        return
+    end
+
+    local myHead = LocalPlayer.Character
+        and (LocalPlayer.Character:FindFirstChild("Head")
+             or LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
+    local tgtHead = CachedTargetHRP.Parent:FindFirstChild("Head") or CachedTargetHRP
+    if not myHead or not tgtHead then destroyNPCTracer() return end
+
+    if not NPCBeam or not NPCBeam.Parent
+       or not NPCB or NPCB.Parent ~= tgtHead then
+        destroyNPCTracer()
+        NPCA = Instance.new("Attachment", myHead)
+        NPCB = Instance.new("Attachment", tgtHead)
+        NPCBeam = Instance.new("Beam")
+        NPCBeam.Attachment0   = NPCA
+        NPCBeam.Attachment1   = NPCB
+        NPCBeam.Color         = ColorSequence.new(CONFIG.NPCColor)
+        NPCBeam.Width0        = 0.2
+        NPCBeam.Width1        = 0.2
+        NPCBeam.FaceCamera    = true
+        NPCBeam.LightEmission = 1
+        NPCBeam.Transparency  = NumberSequence.new(0.2)
+        NPCBeam.Parent        = Workspace
+    end
+end
+
+--==================== ESP ====================
+local espCache = {}
+
+local function clearESP(plr)
+    local d = espCache[plr]
+    if not d then return end
+    if d.name  then pcall(function() d.name:Remove()  end) end
+    if d.level then pcall(function() d.level:Remove() end) end
+    if d.pvp   then pcall(function() d.pvp:Remove()   end) end
+    if d.hp    then pcall(function() d.hp:Remove()    end) end
+    if d.dist  then pcall(function() d.dist:Remove()  end) end
+    espCache[plr] = nil
+end
+
+local function createESP(plr)
+    if espCache[plr] then return espCache[plr] end
+    if not Drawing then return nil end
+    local d = {}
+
+    d.name = Drawing.new("Text")
+    d.name.Size         = 15
+    d.name.Center       = true
+    d.name.Outline      = true
+    d.name.OutlineColor = Color3.new(0, 0, 0)
+    d.name.Visible      = false
+
+    d.level = Drawing.new("Text")
+    d.level.Size         = 14
+    d.level.Center       = true
+    d.level.Outline      = true
+    d.level.OutlineColor = Color3.new(0, 0, 0)
+    d.level.Visible      = false
+
+    d.pvp = Drawing.new("Text")
+    d.pvp.Size         = 13
+    d.pvp.Center       = true
+    d.pvp.Outline      = true
+    d.pvp.OutlineColor = Color3.new(0, 0, 0)
+    d.pvp.Visible      = false
+
+    d.hp = Drawing.new("Text")
+    d.hp.Size         = 12
+    d.hp.Center       = true
+    d.hp.Outline      = true
+    d.hp.OutlineColor = Color3.new(0, 0, 0)
+    d.hp.Visible      = false
+
+    d.dist = Drawing.new("Text")
+    d.dist.Size         = 12
+    d.dist.Center       = true
+    d.dist.Outline      = true
+    d.dist.OutlineColor = Color3.new(0, 0, 0)
+    d.dist.Visible      = false
+
+    espCache[plr] = d
+    return d
+end
+
+local function getPlayerLevel(plr)
+    local ok, lvl = pcall(function()
+        return plr.Data.Level.Value
+    end)
+    if ok and lvl then return lvl end
+    return "?"
+end
+
+local function isPvPActive(plr)
+    local char = plr.Character
+    if not char then return false end
+    if char:FindFirstChild("ForceField") then return false end
+    if plr:GetAttribute("PvpDisabled") == true then return false end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    for _, part in ipairs(SafeZoneParts) do
+        if part.Parent and (hrp.Position - part.Position).Magnitude < part.Size.Magnitude / 2 + 10 then
+            return false
+        end
+    end
+    return true
+end
+
+local function updateESP()
+    if not CONFIG.EnableESP or not Drawing then
+        for plr in pairs(espCache) do clearESP(plr) end
+        return
+    end
+
+    local myChar = LocalPlayer.Character
+    local myHRP  = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar.PrimaryPart)
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LocalPlayer then
+            if espCache[plr] then clearESP(plr) end
+            continue
+        end
+
+        local char = plr.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local hrp  = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+        local head = char and char:FindFirstChild("Head")
+
+        if char and hum and hum.Health > 0 and hrp and head and myHRP then
+            local d = espCache[plr] or createESP(plr)
+            if d then
+                local sp, onScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 3.0, 0))
+                if onScreen then
+                    local color = getTeamColor(plr)
+                    local dist  = math.floor((hrp.Position - myHRP.Position).Magnitude)
+                    local level = getPlayerLevel(plr)
+                    local pvpOn = isPvPActive(plr)
+                    local hp    = math.floor(hum.Health)
+                    local maxHp = math.floor(hum.MaxHealth)
+
+                    d.name.Text     = plr.Name
+                    d.name.Position = Vector2.new(sp.X, sp.Y - 48)
+                    d.name.Color    = color
+                    d.name.Visible  = true
+
+                    if CONFIG.ESPShowLevel then
+                        d.level.Text     = "[ Lv. " .. tostring(level) .. " ]"
+                        d.level.Position = Vector2.new(sp.X, sp.Y - 32)
+                        d.level.Color    = Color3.fromRGB(140, 120, 255)
+                        d.level.Visible  = true
+                    else
+                        d.level.Visible = false
+                    end
+
+                    if CONFIG.ESPShowPvP then
+                        if pvpOn then
+                            d.pvp.Text  = "PvP ATIVADO"
+                            d.pvp.Color = Color3.fromRGB(0, 255, 80)
+                        else
+                            d.pvp.Text  = "PvP DESATIVADO"
+                            d.pvp.Color = Color3.fromRGB(255, 60, 60)
+                        end
+                        d.pvp.Position = Vector2.new(sp.X, sp.Y - 16)
+                        d.pvp.Visible  = true
+                    else
+                        d.pvp.Visible = false
+                    end
+
+                    if CONFIG.ESPShowHP then
+                        d.hp.Text     = "HP " .. hp .. "/" .. maxHp
+                        d.hp.Position = Vector2.new(sp.X, sp.Y)
+                        d.hp.Color    = Color3.fromRGB(120, 230, 150)
+                        d.hp.Visible  = true
+                    else
+                        d.hp.Visible = false
+                    end
+
+                    if CONFIG.ESPShowDist then
+                        d.dist.Text     = tostring(dist) .. "m"
+                        d.dist.Position = Vector2.new(sp.X, sp.Y + 14)
+                        d.dist.Color    = Color3.fromRGB(200, 200, 200)
+                        d.dist.Visible  = true
+                    else
+                        d.dist.Visible = false
+                    end
+                else
+                    d.name.Visible  = false
+                    d.level.Visible = false
+                    d.pvp.Visible   = false
+                    d.hp.Visible    = false
+                    d.dist.Visible  = false
+                end
+            end
+        else
+            clearESP(plr)
+        end
+    end
+end
+
+--==================== CAMLOCK ====================
+RunService.RenderStepped:Connect(function()
+    if not CONFIG.CamlockEnabled then return end
+    if not CachedTargetHRP or not CachedTargetHRP.Parent then return end
+    local head = CachedTargetHRP.Parent:FindFirstChild("Head") or CachedTargetHRP
+    Camera.CFrame = CFrame.new(Camera.CFrame.Position, head.Position)
+end)
+
+--==================== SPEED ====================
+local function applySpeed()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    hum.WalkSpeed = CONFIG.SpeedEnabled and CONFIG.SpeedValue or 16
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    applySpeed()
+end)
+
+task.spawn(function()
+    while task.wait(0.3) do
+        if CONFIG.SpeedEnabled then
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.WalkSpeed ~= CONFIG.SpeedValue then
+                hum.WalkSpeed = CONFIG.SpeedValue
+            end
+        end
+    end
+end)
+
+--==================== DASH (Shift) ====================
+local dashActive = false
+UserInput.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.LeftShift and CONFIG.DashEnabled and not dashActive then
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hum or not hrp then return end
+
+        dashActive = true
+        local original = hum.WalkSpeed
+        hum.WalkSpeed = CONFIG.DashValue
+
+        local dir = Camera.CFrame.LookVector
+        hrp.AssemblyLinearVelocity = Vector3.new(dir.X * CONFIG.DashValue, 0, dir.Z * CONFIG.DashValue)
+
+        task.delay(0.35, function()
+            hum.WalkSpeed = original
+            dashActive = false
+        end)
+    end
+end)
+
+--==================== WALK ON WATER ====================
+local originalWaterSize = nil
+local walkWaterConn     = nil
+
+local function setWalkOnWater(state)
+    if state then
+        if walkWaterConn then return end
+        local map   = Workspace:FindFirstChild("Map")
+        local water = map and map:FindFirstChild("WaterBase-Plane")
+        if not water then return end
+
+        if not originalWaterSize then
+            originalWaterSize = water.Size
+        end
+
+        walkWaterConn = RunService.Heartbeat:Connect(function()
+            local m = Workspace:FindFirstChild("Map")
+            local w = m and m:FindFirstChild("WaterBase-Plane")
+            if w then
+                w.Size = Vector3.new(1000, 113, 1000)
+            end
+        end)
+    else
+        if walkWaterConn then
+            walkWaterConn:Disconnect()
+            walkWaterConn = nil
+        end
+        local map   = Workspace:FindFirstChild("Map")
+        local water = map and map:FindFirstChild("WaterBase-Plane")
+        if water and originalWaterSize then
+            water.Size = originalWaterSize
+        end
+    end
+end
+
+--==================== INFINITE ENERGY ====================
+task.spawn(function()
+    while task.wait(0.5) do
+        if CONFIG.InfiniteEnergy and LocalPlayer.Character then
+            local energy = LocalPlayer.Character:FindFirstChild("Energy")
+            if energy and energy.Value ~= nil then
+                pcall(function() energy.Value = energy.MaxValue or 100 end)
+            end
+            pcall(function() LocalPlayer:SetAttribute("Energy", 100) end)
+        end
+    end
+end)
+
+--==================== FAST ATTACK ====================
+local lastAttack = 0
+task.spawn(function()
+    while task.wait(0.1) do
+        if CONFIG.FastAttack and CachedTargetHRP and CachedTargetHRP.Parent then
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if tool then
+                local myHRP = char:FindFirstChild("HumanoidRootPart")
+                if myHRP then
+                    local dist = (CachedTargetHRP.Position - myHRP.Position).Magnitude
+                    if dist <= CONFIG.FADistance then
+                        local remote = tool:FindFirstChild("LeftClickRemote")
+                        if remote and tick() - lastAttack > 0.08 then
+                            lastAttack = tick()
+                            pcall(function() remote:FireServer() end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+--==================== LOOP PRINCIPAL ====================
+task.spawn(function()
+    while task.wait(CONFIG.UpdateRate) do
+        updateTarget()
+        updatePlayerTracer()
+        updateNPCTracer()
+        updateESP()
+    end
+end)
+
+--==================== UI HUB (com scroll + seções) ====================
+local function buildHub()
+    local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
+
+    local screen = Instance.new("ScreenGui")
+    screen.Name = "Hub_AimbotTracerESP"
+    screen.ResetOnSpawn = false
+    screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screen.Parent = parentGui
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 240, 0, 40)
+    frame.Position = UDim2.new(0, 20, 0, 120)
+    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.ClipsDescendants = true
+    frame.Parent = screen
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(90, 80, 160)
+    stroke.Thickness = 1.2
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 32)
+    titleBar.BackgroundColor3 = Color3.fromRGB(38, 38, 50)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = frame
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -34, 1, 0)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "HUB | Aimbot"
+    title.TextColor3 = Color3.fromRGB(230, 230, 240)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 13
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = titleBar
+
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 22, 0, 22)
+    minBtn.Position = UDim2.new(1, -28, 0, 5)
+    minBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 78)
+    minBtn.TextColor3 = Color3.fromRGB(230, 230, 240)
+    minBtn.Text = "−"
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 16
+    minBtn.BorderSizePixel = 0
+    minBtn.Parent = titleBar
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 5)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -16, 0, 0)
+    scroll.Position = UDim2.new(0, 8, 0, 38)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 80, 160)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.ScrollBarImageTransparency = 0
+    scroll.Parent = frame
+
+    local uiList = Instance.new("UIListLayout", scroll)
+    uiList.Padding = UDim.new(0, 6)
+    uiList.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local minimized = false
+    local ROW_H = 32
+    local SECTION_H = 20
+
+    local function recalc()
+        if minimized then
+            frame.Size = UDim2.new(0, 240, 0, 40)
+            scroll.Visible = false
+            minBtn.Text = "+"
+        else
+            local contentHeight = uiList.AbsoluteContentSize.Y + 8
+            local maxVisible = 380
+            local visibleH = math.min(contentHeight, maxVisible)
+
+            frame.Size = UDim2.new(0, 240, 0, 38 + visibleH + 10)
+            scroll.Size = UDim2.new(1, -16, 0, visibleH + 4)
+            scroll.CanvasSize = UDim2.new(0, 0, 0, contentHeight)
+            scroll.Visible = true
+            minBtn.Text = "−"
+        end
+    end
+
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        recalc()
+    end)
+
+    uiList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        task.defer(recalc)
+    end)
+
+    local function makeToggle(text, getState, setState)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, -8, 0, ROW_H)
+        btn.BackgroundColor3 = getState() and Color3.fromRGB(70, 160, 110)
+                                             or Color3.fromRGB(55, 55, 70)
+        btn.TextColor3 = Color3.fromRGB(230, 230, 240)
+        btn.Font = Enum.Font.Gotham
+        btn.TextSize = 12
+        btn.Text = text .. ": " .. (getState() and "ON" or "OFF")
+        btn.BorderSizePixel = 0
+        btn.Parent = scroll
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+        btn.MouseButton1Click:Connect(function()
+            local new = not getState()
+            setState(new)
+            btn.BackgroundColor3 = new and Color3.fromRGB(70, 160, 110)
+                                       or Color3.fromRGB(55, 55, 70)
+            btn.Text = text .. ": " .. (new and "ON" or "OFF")
+        end)
+
+        return btn
+    end
+
+    local function makeSection(name)
+        local wrap = Instance.new("Frame")
+        wrap.Size = UDim2.new(1, -8, 0, SECTION_H)
+        wrap.BackgroundTransparency = 1
+        wrap.Parent = scroll
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = "▸ " .. name:upper()
+        lbl.TextColor3 = Color3.fromRGB(140, 120, 255)
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 11
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = wrap
+    end
+
+    -- AIMBOT
+    makeSection("Aimbot")
+    makeToggle("Aimbot", function() return CONFIG.EnableAimbot end,
+        function(v) CONFIG.EnableAimbot = v end)
+    makeToggle("Aimbot Players", function() return CONFIG.AimbotSkillsPlayer end,
+        function(v) CONFIG.AimbotSkillsPlayer = v end)
+    makeToggle("Aimbot NPCs", function() return CONFIG.AimbotSkillsNPC end,
+        function(v) CONFIG.AimbotSkillsNPC = v end)
+    makeToggle("Camlock", function() return CONFIG.CamlockEnabled end,
+        function(v) CONFIG.CamlockEnabled = v end)
+    makeToggle("Team Check", function() return CONFIG.TeamCheck end,
+        function(v) CONFIG.TeamCheck = v end)
+
+    -- TRACER
+    makeSection("Tracer")
+    makeToggle("Tracer (Player)", function() return CONFIG.EnableTracer end,
+        function(v)
+            CONFIG.EnableTracer = v
+            if not v then destroyPlayerTracer() end
+        end)
+    makeToggle("Tracer (NPC)", function() return CONFIG.NPCTracers end,
+        function(v)
+            CONFIG.NPCTracers = v
+            if not v then destroyNPCTracer() end
+        end)
+
+    -- ESP
+    makeSection("ESP")
+    makeToggle("ESP", function() return CONFIG.EnableESP end,
+        function(v)
+            CONFIG.EnableESP = v
+            if not v then
+                for plr in pairs(espCache) do clearESP(plr) end
+            end
+        end)
+    makeToggle("ESP Level", function() return CONFIG.ESPShowLevel end,
+        function(v) CONFIG.ESPShowLevel = v end)
+    makeToggle("ESP PvP", function() return CONFIG.ESPShowPvP end,
+        function(v) CONFIG.ESPShowPvP = v end)
+    makeToggle("ESP HP", function() return CONFIG.ESPShowHP end,
+        function(v) CONFIG.ESPShowHP = v end)
+    makeToggle("ESP Dist", function() return CONFIG.ESPShowDist end,
+        function(v) CONFIG.ESPShowDist = v end)
+
+    -- MOVEMENT
+    makeSection("Movement")
+    makeToggle("Speed Hack", function() return CONFIG.SpeedEnabled end,
+        function(v) CONFIG.SpeedEnabled = v applySpeed() end)
+    makeToggle("Dash (Shift)", function() return CONFIG.DashEnabled end,
+        function(v) CONFIG.DashEnabled = v end)
+    makeToggle("Walk on Water", function() return CONFIG.WalkOnWater end,
+        function(v)
+            CONFIG.WalkOnWater = v
+            setWalkOnWater(v)
+        end)
+    makeToggle("Infinite Energy", function() return CONFIG.InfiniteEnergy end,
+        function(v) CONFIG.InfiniteEnergy = v end)
+
+    -- COMBAT
+    makeSection("Combat")
+    makeToggle("Fast Attack", function() return CONFIG.FastAttack end,
+        function(v) CONFIG.FastAttack = v end)
+
+    task.defer(recalc)
+end
+
+buildHub()
+
+--==================== COMANDOS ====================
+getgenv().AimbotToggle = function(s) CONFIG.EnableAimbot = s and true or false end
+getgenv().TracerToggle = function(s)
+    CONFIG.EnableTracer = s and true or false
+    if not CONFIG.EnableTracer then destroyPlayerTracer() end
+end
+getgenv().ESPToggle   = function(s) CONFIG.EnableESP = s and true or false end
+getgenv().AimbotFOV   = function(v) CONFIG.FOV = v or 0 end
+getgenv().AimbotTeam  = function(v) CONFIG.TeamCheck = v and true or false end
+getgenv().AimbotDist  = function(v) CONFIG.MaxDistance = v or 2000 end
+getgenv().HUB_Config  = CONFIG
